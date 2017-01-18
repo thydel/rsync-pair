@@ -1,0 +1,96 @@
+---
+# tasks file for rsync-pair
+
+- user:
+    name: '{{ user }}'
+    comment: '{{ comment }}'
+    generate_ssh_key: True
+  name: creates user {{ user }} on {{ inventory_hostname }}
+  tags: client
+
+- block:
+
+  - command: echo $HOME
+    register: home
+    changed_when: False
+    name: registers ansible runner ({{ ansible_user_id }}) HOME on {{ inventory_hostname }}
+  
+  - command: cat {{ home.stdout }}/.ssh/authorized_keys
+    register: keys
+    changed_when: False
+    name: registers ansible runner ({{ ansible_user_id }}) keys on {{ inventory_hostname }}
+
+  become: False
+  check_mode: False
+  tags: client
+
+- command: getent passwd {{ user }}
+  register: getent
+  failed_when: getent.rc not in [0, 2]
+  changed_when: False
+  check_mode: False
+  name: registers user {{ user }} existence on {{ inventory_hostname }}
+
+- authorized_key:
+    user: '{{ user }}'
+    key: '{{ item }}'
+  with_items: '{{ keys.stdout_lines }}'
+  loop_control:
+    label: '{{ item.split()[-1] }}'
+  when: getent.rc == 0
+  name: adds ansible runner ({{ ansible_user_id }}) keys to {{ user }} on {{ inventory_hostname }}
+  tags: client
+
+- block:
+
+  - command: echo $HOME
+    register: home
+    changed_when: False
+    name: registers generated {{ user }} HOME on {{ inventory_hostname }}
+  
+  - command: cat {{ home.stdout }}/.ssh/id_rsa.pub
+    register: key
+    changed_when: False
+    name: registers generated {{ user }}) key on {{ inventory_hostname }}
+
+  become_user: '{{ user }}'
+  check_mode: False
+  when: getent.rc == 0
+  tags: server
+
+- block:
+
+  - user:
+      name: '{{ user }}'
+      comment: '{{ comment }}'
+      groups: '{{ user_groups }}'
+      append: True
+    name: creates user {{ user }} on {{ server }}
+  
+  - command: getent passwd {{ user }}
+    register: getent
+    failed_when: getent.rc not in [0, 2]
+    changed_when: False
+    check_mode: False
+    name: registers user {{ user }} existence on {{ server }}
+
+  - authorized_key:
+      user: '{{ user }}'
+      key: '{{ key.stdout }}'
+      key_options: command="rsync --server --daemon ."
+    when: getent.rc == 0
+    name: adds user ({{ user }}) key to {{ user }} on {{ server }} to allow rsync daemon
+
+  - copy:
+      content: |
+        [self]
+            path = {{ path }}
+            read only = no
+            use chroot = no
+      dest: '{{ home.stdout }}/rsyncd.conf'
+    become_user: '{{ user }}'
+    when: getent.rc == 0
+    name: creates rsyncd.conf for user {{ user }} on {{ server }}
+      
+  delegate_to: '{{ server }}'
+  tags: server
